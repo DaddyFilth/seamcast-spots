@@ -7,7 +7,8 @@ const nextConfig = {
         headers: [
           {
             key: 'Access-Control-Allow-Origin',
-            value: 'https://fishfinder-pro.online',
+            // Seamcast app deployment (no trailing slash)
+            value: 'https://seamcast-g0jya8jpj-daddyfilths-projects.vercel.app',
           },
           {
             key: 'Access-Control-Allow-Methods',
