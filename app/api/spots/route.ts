@@ -48,6 +48,7 @@ type SpotsResponse = {
     shortForecast: string | null
     isDaytime: boolean | null
   }
+  analysis: { provider: 'groq'; model: string }
   overallBite: BiteScore
   speciesLikely: SpeciesPrediction[]
   recommendedBaits: BaitRecommendation[]
@@ -421,6 +422,7 @@ export async function GET(req: NextRequest) {
     const response: SpotsResponse = {
       query,
       conditions,
+      analysis: { provider: 'groq', model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile' },
       overallBite,
       speciesLikely,
       recommendedBaits,
