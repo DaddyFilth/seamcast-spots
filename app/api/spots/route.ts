@@ -88,64 +88,118 @@ function parseQuery(req: NextRequest): SpotsQuery {
     lon < -180 ||
     lon > 180
   ) {
-    throw new Error('lat and lon are required valid coordinates')
+    throw new ApiError('lat and lon are required valid coordinates', 400)
   }
   if ((species && species.length > 100) || (time && time.length > 100)) {
-    throw new Error('species and time must be 100 characters or fewer')
+    throw new ApiError('species and time must be 100 characters or fewer', 400)
+  }
+  if (time && time !== 'now' && Number.isNaN(Date.parse(time))) {
+    throw new ApiError('time must be "now" or a valid date-time', 400)
   }
 
   return { lat, lon, species, time }
 }
 
-async function fetchWeatherGovPointForecast(lat: number, lon: number) {
-  const pointsRes = await fetch(`https://api.weather.gov/points/${lat},${lon}`, {
-    headers: {
-      'Accept': 'application/geo+json',
-      'User-Agent': 'seamcast/1.0 (spots api; contact: your-email@example.com)',
-    },
-  })
-
-  if (!pointsRes.ok) {
-    throw new Error(`weather.gov points error: ${pointsRes.status}`)
+async function fetchWeatherGov(url: string): Promise<unknown> {
+  let response: Response
+  try {
+    response = await fetch(url, {
+      headers: {
+        Accept: 'application/geo+json',
+        'User-Agent': 'Fishfinder-Pro/1.0 (https://fishfinder-pro.online)',
+      },
+      cache: 'no-store',
+      signal: AbortSignal.timeout(10_000),
+    })
+  } catch {
+    throw new ApiError('Unable to reach the weather service', 502)
   }
 
-  const pointsJson: { properties?: { forecast?: unknown } } = await pointsRes.json()
-  const forecastUrl =
-    typeof pointsJson.properties?.forecast === 'string'
-      ? pointsJson.properties.forecast
-      : undefined
+  if (!response.ok) {
+    throw new ApiError(`Weather service returned status ${response.status}`, 502)
+  }
+
+  try {
+    return await response.json()
+  } catch {
+    throw new ApiError('Weather service returned an invalid response', 502)
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+async function fetchWeatherGovPointForecast(
+  lat: number,
+  lon: number,
+  requestedTime?: string
+) {
+  const pointsJson = await fetchWeatherGov(
+    `https://api.weather.gov/points/${lat},${lon}`
+  )
+  const pointProperties =
+    isRecord(pointsJson) && isRecord(pointsJson.properties)
+      ? pointsJson.properties
+      : null
+  const forecastUrl = pointProperties?.forecast
   if (!forecastUrl) {
-    throw new Error('weather.gov points response missing forecast URL')
+    throw new ApiError('Weather service response missing forecast URL', 502)
   }
 
-  const forecastRes = await fetch(forecastUrl, {
-    headers: {
-      'Accept': 'application/geo+json',
-      'User-Agent': 'seamcast/1.0 (spots api; contact: your-email@example.com)',
-    },
-  })
-
-  if (!forecastRes.ok) {
-    throw new Error(`weather.gov forecast error: ${forecastRes.status}`)
+  let parsedForecastUrl: URL
+  try {
+    parsedForecastUrl = new URL(forecastUrl as string)
+  } catch {
+    throw new ApiError('Weather service returned an invalid forecast URL', 502)
+  }
+  if (
+    typeof forecastUrl !== 'string' ||
+    parsedForecastUrl.origin !== 'https://api.weather.gov' ||
+    parsedForecastUrl.username ||
+    parsedForecastUrl.password
+  ) {
+    throw new ApiError('Weather service returned an invalid forecast URL', 502)
   }
 
-  const forecastJson: { properties?: { periods?: unknown } } = await forecastRes.json()
-  const periods = forecastJson.properties?.periods
+  const forecastData = await fetchWeatherGov(forecastUrl)
+  const forecastProperties =
+    isRecord(forecastData) && isRecord(forecastData.properties)
+      ? forecastData.properties
+      : null
+  const periods = forecastProperties?.periods
   if (!Array.isArray(periods) || periods.length === 0) {
-    throw new Error('weather.gov forecast response missing periods')
+    throw new ApiError('Weather service response missing forecast periods', 502)
   }
 
-  const p = periods[0]
-  if (typeof p !== 'object' || p === null) {
-    throw new Error('weather.gov forecast response has an invalid period')
+  const forecastPeriods: unknown[] = periods
+  const targetTime =
+    requestedTime && requestedTime !== 'now' ? Date.parse(requestedTime) : Date.now()
+  const period = forecastPeriods.find(item => {
+    if (!isRecord(item)) return false
+    const candidate = item
+    return (
+      typeof candidate.startTime === 'string' &&
+      typeof candidate.endTime === 'string' &&
+      Date.parse(candidate.startTime) <= targetTime &&
+      targetTime < Date.parse(candidate.endTime)
+    )
+  }) as Record<string, unknown> | undefined
+
+  if (!period) {
+    if (requestedTime && requestedTime !== 'now') {
+      throw new ApiError('Requested time is outside the available forecast', 422)
+    }
+    throw new ApiError('Weather service returned no current forecast period', 502)
   }
-  const period = p as Record<string, unknown>
-  if (typeof period.startTime !== 'string') {
-    throw new Error('weather.gov forecast response is missing a start time')
-  }
+
+  const forecastUpdated =
+    [forecastProperties?.updated, forecastProperties?.generatedAt].find(
+      value => typeof value === 'string' && !Number.isNaN(Date.parse(value))
+    ) as string | undefined
 
   return {
-    issuedAt: period.startTime,
+    issuedAt: forecastUpdated ?? period.startTime as string,
     temperatureF: typeof period.temperature === 'number' ? period.temperature : null,
     windSpeedText: typeof period.windSpeed === 'string' ? period.windSpeed : null,
     windDirection: typeof period.windDirection === 'string' ? period.windDirection : null,
@@ -319,29 +373,15 @@ function buildMicroSpots(
   species: SpeciesPrediction[],
   baits: BaitRecommendation[]
 ): MicroSpot[] {
-  const baseLat = query.lat
-  const baseLon = query.lon
-
-  const offsets = [
-    { id: 'north-wind-bank', dLat: 0.001, dLon: 0 },
-    { id: 'point-east', dLat: 0, dLon: 0.001 },
-    { id: 'creek-channel-south', dLat: -0.001, dLon: 0 },
-  ]
-
-  return offsets.map((o, idx) => ({
-    id: o.id,
-    label:
-      idx === 0
-        ? 'Wind-blown bank'
-        : idx === 1
-        ? 'Main lake point'
-        : 'Creek channel edge',
-    lat: baseLat + o.dLat,
-    lon: baseLon + o.dLon,
+  return [{
+    id: 'requested-location',
+    label: 'Requested location (nearby structure not verified)',
+    lat: query.lat,
+    lon: query.lon,
     biteScore: bite,
     bestSpecies: species,
     bestBaits: baits,
-  }))
+  }]
 }
 
 export async function GET(req: NextRequest) {
@@ -351,7 +391,7 @@ export async function GET(req: NextRequest) {
       throw new ApiError('Groq is not configured; set GROQ_API_KEY', 500)
     }
 
-    const wx = await fetchWeatherGovPointForecast(query.lat, query.lon)
+    const wx = await fetchWeatherGovPointForecast(query.lat, query.lon, query.time)
 
     const windSpeedMph = parseWindSpeedMph(wx.windSpeedText)
     const conditions: SpotsResponse['conditions'] = {
@@ -390,7 +430,7 @@ export async function GET(req: NextRequest) {
         error: 'Spots API error',
         message: err instanceof Error ? err.message : 'Unknown error',
       },
-      { status: err instanceof ApiError ? err.status : 400 }
+      { status: err instanceof ApiError ? err.status : 500 }
     )
   }
 }
