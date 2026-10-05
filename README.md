@@ -36,6 +36,12 @@ Predictions are grounded in real logged outings, never invented history. Apply `
 
 Not yet implemented: rate limiting, rating predictions against outcomes, and fine-tuning (worth considering only with thousands of logged outings). `catch_logs` is unchanged; `trip_logs` is the table used for matching.
 
+### Database migrations
+
+Schema changes live in `supabase/migrations/` (config in `supabase/config.toml`). `.github/workflows/supabase-migrate.yml` runs `supabase db push` on every push to `main` that changes them, so the database schema is aligned with the code as it is deployed. Applied migrations are tracked by Supabase and never re-run; add new numbered files instead of editing applied ones.
+
+Add these GitHub repository secrets once: `SUPABASE_ACCESS_TOKEN` (account access token), `SUPABASE_DB_PASSWORD` (database password) and `SUPABASE_PROJECT_ID` (project ref). In the hosting environment set `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY`. Locally, `npm run db:start` and `npm run db:reset` run and rebuild a local database from the migrations; `npm run db:push` applies them to a linked project by hand.
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:
