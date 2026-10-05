@@ -52,11 +52,11 @@ export default function HealthPage() {
         const json = await res.json();
         setApiStatus('ok');
         setApiDetails(JSON.stringify(json, null, 2));
-      } catch (err: any) {
+      } catch (err: unknown) {
         setApiStatus('error');
         setApiDetails(
-          err?.message
-            ? String(err.message)
+          err instanceof Error
+            ? err.message
             : 'Unknown error contacting /api/spots',
         );
       }

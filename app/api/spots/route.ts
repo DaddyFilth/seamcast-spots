@@ -71,16 +71,16 @@ class ApiError extends Error {
 
 function parseQuery(req: NextRequest): SpotsQuery {
   const sp = req.nextUrl.searchParams
-  const rawLat = sp.get('lat')
-  const rawLon = sp.get('lon')
+  const rawLat = sp.get('lat')?.trim()
+  const rawLon = sp.get('lon')?.trim()
   const lat = Number(rawLat)
   const lon = Number(rawLon)
   const species = sp.get('species') || undefined
   const time = sp.get('time') || undefined
 
   if (
-    rawLat === null ||
-    rawLon === null ||
+    !rawLat ||
+    !rawLon ||
     !Number.isFinite(lat) ||
     !Number.isFinite(lon) ||
     lat < -90 ||
@@ -93,8 +93,13 @@ function parseQuery(req: NextRequest): SpotsQuery {
   if ((species && species.length > 100) || (time && time.length > 100)) {
     throw new ApiError('species and time must be 100 characters or fewer', 400)
   }
-  if (time && time !== 'now' && Number.isNaN(Date.parse(time))) {
-    throw new ApiError('time must be "now" or a valid date-time', 400)
+  if (
+    time &&
+    time !== 'now' &&
+    (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/i.test(time) ||
+      Number.isNaN(Date.parse(time)))
+  ) {
+    throw new ApiError('time must be "now" or an ISO date-time with a timezone', 400)
   }
 
   return { lat, lon, species, time }
