@@ -421,6 +421,8 @@ function numberAt(values: unknown, index: number): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null
 }
 
+const MAX_OBSERVATION_AGE_MS = 6 * 3_600_000
+
 type Measurement = { value: number; station: string; distanceKm: number; observedAt: string | null }
 
 function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
@@ -465,6 +467,8 @@ async function fetchUsgs(query: SpotsQuery) {
     const v = Number(last.value)
     const noData = (ts.variable as { noDataValue?: number }).noDataValue
     if (!Number.isFinite(v) || v === noData) continue
+    const observedMs = Date.parse(String(last.dateTime ?? ''))
+    if (!Number.isFinite(observedMs) || Date.now() - observedMs > MAX_OBSERVATION_AGE_MS) continue
     const km = haversineKm(query.lat, query.lon, Number(geo.latitude), Number(geo.longitude))
     if (!Number.isFinite(km)) continue
     const name = String(ts.sourceInfo.siteName ?? 'unknown')
@@ -481,58 +485,73 @@ async function fetchUsgs(query: SpotsQuery) {
   return { waterTempF: best['00010'] ?? null, flowCfs: best['00060'] ?? null, gageFt: best['00065'] ?? null }
 }
 
-let noaaStationCache: { id: string; name: string; lat: number; lng: number }[] | null = null
+type NoaaStation = { id: string; name: string; lat: number; lng: number }
+const noaaStationCache: Record<string, NoaaStation[] | undefined> = {}
 
-// Nearest NOAA CO-OPS tide station within 100 km: latest measured water temperature and today's high/low tides.
-async function fetchNoaa(query: SpotsQuery, when: Date) {
-  if (!noaaStationCache) {
+async function nearestNoaaStation(type: 'tidepredictions' | 'watertemp', query: SpotsQuery) {
+  let stations = noaaStationCache[type]
+  if (!stations) {
     const list = await getJson(
-      'https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations.json?type=tidepredictions',
+      'https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations.json?type=' + type,
       15_000
     )
-    const stations = isRecord(list) && Array.isArray(list.stations) ? list.stations : []
-    noaaStationCache = stations
+    const raw = isRecord(list) && Array.isArray(list.stations) ? list.stations : []
+    stations = raw
       .filter(isRecord)
       .map(st => ({ id: String(st.id), name: String(st.name), lat: Number(st.lat), lng: Number(st.lng) }))
       .filter(st => Number.isFinite(st.lat) && Number.isFinite(st.lng))
+    noaaStationCache[type] = stations
   }
   let nearest: { id: string; name: string; km: number } | null = null
-  for (const st of noaaStationCache) {
+  for (const st of stations) {
     const km = haversineKm(query.lat, query.lon, st.lat, st.lng)
     if (km <= 100 && (!nearest || km < nearest.km)) nearest = { id: st.id, name: st.name, km }
   }
-  if (!nearest) return null
-  const distanceKm = Math.round(nearest.km * 10) / 10
-  const base = 'https://api.tidesandcurrents.noaa.gov/api/prod/datagetter?format=json&units=english&time_zone=gmt&station=' + nearest.id
+  return nearest
+}
+
+// Nearest NOAA CO-OPS stations within 100 km: latest measured water temperature (nearest station that has a
+// water temperature sensor) and today's high/low tide predictions (nearest prediction station).
+async function fetchNoaa(query: SpotsQuery, when: Date) {
+  const isCurrent = Math.abs(when.getTime() - Date.now()) <= 2 * 3_600_000
+  const apiBase =
+    'https://api.tidesandcurrents.noaa.gov/api/prod/datagetter?format=json&units=english&time_zone=gmt&station='
   const day = when.toISOString().slice(0, 10).replace(/-/g, '')
 
-  const [tempRes, tideRes] = await Promise.allSettled([
-    getJson(base + '&product=water_temperature&date=latest'),
-    getJson(base + `&product=predictions&datum=MLLW&interval=hilo&begin_date=${day}&end_date=${day}`),
-  ])
-
-  let waterTempF: Measurement | null = null
-  if (tempRes.status === 'fulfilled' && isRecord(tempRes.value) && Array.isArray(tempRes.value.data)) {
-    const row = tempRes.value.data[0] as { v?: string; t?: string } | undefined
+  const tempTask = async (): Promise<Measurement | null> => {
+    if (!isCurrent) return null
+    const st = await nearestNoaaStation('watertemp', query)
+    if (!st) return null
+    const data = await getJson(apiBase + st.id + '&product=water_temperature&date=latest')
+    const row = isRecord(data) && Array.isArray(data.data) ? (data.data[0] as { v?: string; t?: string } | undefined) : undefined
     const v = Number(row?.v)
-    if (row && row.v !== '' && Number.isFinite(v)) {
-      waterTempF = { value: v, station: nearest.name, distanceKm, observedAt: row.t ? row.t.replace(' ', 'T') + ':00Z' : null }
-    }
+    if (!row || row.v === '' || !Number.isFinite(v)) return null
+    const observedAt = row.t ? row.t.replace(' ', 'T') + ':00Z' : null
+    if (!observedAt || Date.now() - Date.parse(observedAt) > MAX_OBSERVATION_AGE_MS) return null
+    return { value: v, station: st.name, distanceKm: Math.round(st.km * 10) / 10, observedAt }
   }
 
-  let events: { time: string; type: 'high' | 'low'; heightFt: number }[] = []
-  if (tideRes.status === 'fulfilled' && isRecord(tideRes.value) && Array.isArray(tideRes.value.predictions)) {
-    events = (tideRes.value.predictions as { t?: string; v?: string; type?: string }[])
+  const tideTask = async () => {
+    const st = await nearestNoaaStation('tidepredictions', query)
+    if (!st) return null
+    const data = await getJson(
+      apiBase + st.id + `&product=predictions&datum=MLLW&interval=hilo&begin_date=${day}&end_date=${day}`
+    )
+    const preds = isRecord(data) && Array.isArray(data.predictions) ? (data.predictions as { t?: string; v?: string; type?: string }[]) : []
+    const events = preds
       .filter(p => p.t && Number.isFinite(Number(p.v)) && (p.type === 'H' || p.type === 'L'))
       .map(p => ({
         time: p.t!.replace(' ', 'T') + ':00Z',
         type: p.type === 'H' ? ('high' as const) : ('low' as const),
         heightFt: Number(p.v),
       }))
+    return events.length ? { station: st.name, distanceKm: Math.round(st.km * 10) / 10, events } : null
   }
+
+  const [temp, tides] = await Promise.allSettled([tempTask(), tideTask()])
   return {
-    waterTempF,
-    tides: events.length ? { station: nearest.name, distanceKm, events } : null,
+    waterTempF: temp.status === 'fulfilled' ? temp.value : null,
+    tides: tides.status === 'fulfilled' ? tides.value : null,
   }
 }
 
@@ -560,8 +579,9 @@ async function fetchEnvironment(query: SpotsQuery): Promise<Environment> {
     tides: null,
   }
 
+  const isCurrent = Math.abs(when.getTime() - Date.now()) <= 2 * 3_600_000
   const [usgs, noaa] = await Promise.all([
-    fetchUsgs(query).catch(() => null),
+    (isCurrent ? fetchUsgs(query) : Promise.resolve(null)).catch(() => null),
     fetchNoaa(query, when).catch(() => null),
   ])
   if (usgs) {
