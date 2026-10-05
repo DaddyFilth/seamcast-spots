@@ -26,6 +26,16 @@ This project uses [`next/font`](https://nextjs.org/docs/app/building-your-applic
 
 Set `GROQ_API_KEY` in the server environment before using the endpoint. `GROQ_MODEL` optionally selects a Groq model; it defaults to `llama-3.3-70b-versatile`. The API fetches the matching forecast period from the National Weather Service, supplements it with keyless public data from Open-Meteo (pressure and trend, cloud cover, humidity, precipitation probability, gusts, surface temperature proxy, sunrise/sunset) plus a computed moon phase, and sends everything to Groq. It also adds measured water temperature, streamflow and gage height from the nearest active USGS gauges (within about 30 km) and today's tide predictions plus water temperature from the nearest NOAA CO-OPS station (within 100 km); each reading lists its station and distance under `observations`. USGS and NOAA water readings are latest observations, not forecasts: they are only returned for current requests (`time` within 2 hours of now) and only if observed within the last 6 hours; otherwise they are `null`. The supplement is best-effort and returned as `environment`; unavailable values are `null`. `waterSurfaceTempProxyF` is ground-surface temperature, not measured water temperature.
 
+### Outing history
+
+Predictions are grounded in real logged outings, never invented history. Apply `supabase/migrations/0002_trip_history.sql`, then set `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY`.
+
+- `POST /api/trips` (header `Authorization: ****** access token>`) logs an outing, including trips with no fish. Body: `lat`, `lon`, `startedAt`, `durationHours`, `caught`, and optionally `fishCount`, `species`, `bait`, `depthFt`, `waterbodyId`, `shareForMatching`. The API stores the real conditions for that time: current NWS/Open-Meteo/USGS/NOAA data, or Open-Meteo archive and USGS/NOAA past observations for earlier trips. Only the signed-in user can read their own trips.
+- Trips with `shareForMatching: true` (default `false`) are included, anonymized (no user, exact coordinates or timestamps), in matching via the `match_outings` function.
+- `/api/spots` finds logged outings in the same season with similar pressure trend, air/water temperature, wind, cloud cover, moon and time of day, widening the area (10 km, 50 km, 200 km) only when fewer than 10 match. It sends the summary to Groq and returns it as `historicalBasis` (`matchedCases`, `dataQuality`, `catchRate`, species, bait success rates, median depth). With no matches it says so and the advice uses current conditions only.
+
+Not yet implemented: rate limiting, rating predictions against outcomes, and fine-tuning (worth considering only with thousands of logged outings). `catch_logs` is unchanged; `trip_logs` is the table used for matching.
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:
