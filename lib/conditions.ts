@@ -437,7 +437,10 @@ export async function fetchEnvironment(query: SpotsQuery): Promise<Environment> 
 export async function snapshotConditions(
   query: SpotsQuery
 ): Promise<{ conditions: WeatherConditions; environment: Environment }> {
-  const wx = await fetchWeatherGovPointForecast(query.lat, query.lon, query.time)
+  const [wx, environment] = await Promise.all([
+    fetchWeatherGovPointForecast(query.lat, query.lon, query.time),
+    fetchEnvironment(query),
+  ])
   const conditions: WeatherConditions = {
     source: 'api.weather.gov',
     issuedAt: wx.issuedAt,
@@ -447,6 +450,5 @@ export async function snapshotConditions(
     shortForecast: wx.shortForecast,
     isDaytime: wx.isDaytime,
   }
-  const environment = await fetchEnvironment(query)
   return { conditions, environment }
 }
