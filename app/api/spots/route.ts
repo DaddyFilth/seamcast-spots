@@ -109,8 +109,11 @@ async function fetchWeatherGovPointForecast(lat: number, lon: number) {
     throw new Error(`weather.gov points error: ${pointsRes.status}`)
   }
 
-  const pointsJson = await pointsRes.json()
-  const forecastUrl = pointsJson.properties?.forecast as string | undefined
+  const pointsJson: { properties?: { forecast?: unknown } } = await pointsRes.json()
+  const forecastUrl =
+    typeof pointsJson.properties?.forecast === 'string'
+      ? pointsJson.properties.forecast
+      : undefined
   if (!forecastUrl) {
     throw new Error('weather.gov points response missing forecast URL')
   }
@@ -126,20 +129,28 @@ async function fetchWeatherGovPointForecast(lat: number, lon: number) {
     throw new Error(`weather.gov forecast error: ${forecastRes.status}`)
   }
 
-  const forecastJson = await forecastRes.json()
-  const periods = forecastJson.properties?.periods as any[] | undefined
+  const forecastJson: { properties?: { periods?: unknown } } = await forecastRes.json()
+  const periods = forecastJson.properties?.periods
   if (!Array.isArray(periods) || periods.length === 0) {
     throw new Error('weather.gov forecast response missing periods')
   }
 
   const p = periods[0]
+  if (typeof p !== 'object' || p === null) {
+    throw new Error('weather.gov forecast response has an invalid period')
+  }
+  const period = p as Record<string, unknown>
+  if (typeof period.startTime !== 'string') {
+    throw new Error('weather.gov forecast response is missing a start time')
+  }
+
   return {
-    issuedAt: p.startTime as string,
-    temperatureF: typeof p.temperature === 'number' ? p.temperature : null,
-    windSpeedText: typeof p.windSpeed === 'string' ? p.windSpeed : null,
-    windDirection: typeof p.windDirection === 'string' ? p.windDirection : null,
-    shortForecast: typeof p.shortForecast === 'string' ? p.shortForecast : null,
-    isDaytime: typeof p.isDaytime === 'boolean' ? p.isDaytime : null,
+    issuedAt: period.startTime,
+    temperatureF: typeof period.temperature === 'number' ? period.temperature : null,
+    windSpeedText: typeof period.windSpeed === 'string' ? period.windSpeed : null,
+    windDirection: typeof period.windDirection === 'string' ? period.windDirection : null,
+    shortForecast: typeof period.shortForecast === 'string' ? period.shortForecast : null,
+    isDaytime: typeof period.isDaytime === 'boolean' ? period.isDaytime : null,
   }
 }
 
