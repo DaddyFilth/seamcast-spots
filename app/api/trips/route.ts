@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { ApiError, isRecord } from '@/lib/conditions'
+import { verifyFishfinderToken } from '@/lib/fishfinder'
 import { normalizeConditions, snapshotForLog } from '@/lib/history'
 
 export const dynamic = 'force-dynamic'
@@ -31,14 +32,26 @@ export async function POST(req: NextRequest) {
     const token = /^Bearer\s+(\S+)$/i.exec(req.headers.get('authorization') ?? '')?.[1]
     if (!token) throw new ApiError('Authorization bearer token required', 401)
 
+    // Own users are verified against this project's auth; Fishfinder Pro users against theirs.
+    let ownerId: string | null = null
     const userRes = await fetch(supabaseUrl + '/auth/v1/user', {
       headers: { apikey: anonKey, Authorization: 'Bearer ' + token },
       cache: 'no-store',
       signal: AbortSignal.timeout(8_000),
     })
-    if (!userRes.ok) throw new ApiError('Invalid or expired token', 401)
-    const user: unknown = await userRes.json()
-    if (!isRecord(user) || typeof user.id !== 'string') throw new ApiError('Invalid or expired token', 401)
+    if (userRes.ok) {
+      const user: unknown = await userRes.json()
+      if (isRecord(user) && typeof user.id === 'string') ownerId = user.id
+    }
+    let fishfinderUserId: string | null = null
+    if (!ownerId) {
+      fishfinderUserId = await verifyFishfinderToken(token)
+      if (!fishfinderUserId) throw new ApiError('Invalid or expired token', 401)
+    }
+    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim()
+    if (fishfinderUserId && !serviceKey) {
+      throw new ApiError('Fishfinder Pro logging is not configured; set SUPABASE_SERVICE_ROLE_KEY', 500)
+    }
 
     let body: unknown
     try {
@@ -77,13 +90,15 @@ export async function POST(req: NextRequest) {
     const insert = await fetch(supabaseUrl + '/rest/v1/trip_logs', {
       method: 'POST',
       headers: {
-        apikey: anonKey,
-        Authorization: 'Bearer ' + token,
+        apikey: fishfinderUserId ? serviceKey! : anonKey,
+        Authorization: 'Bearer ' + (fishfinderUserId ? serviceKey! : token),
         'Content-Type': 'application/json',
         Prefer: 'return=representation',
       },
       body: JSON.stringify({
-        user_id: user.id,
+        user_id: ownerId,
+        external_source: fishfinderUserId ? 'fishfinder-pro' : null,
+        external_user_id: fishfinderUserId,
         waterbody_id: waterbodyId,
         lat,
         lon,

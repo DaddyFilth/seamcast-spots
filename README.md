@@ -42,6 +42,12 @@ Schema changes live in `supabase/migrations/` (config in `supabase/config.toml`)
 
 Add these GitHub repository secrets once: `SUPABASE_ACCESS_TOKEN` (account access token), `SUPABASE_DB_PASSWORD` (database password) and `SUPABASE_PROJECT_ID` (project ref). In the hosting environment set `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY`. Locally, `npm run db:start` and `npm run db:reset` run and rebuild a local database from the migrations; `npm run db:push` applies them to a linked project by hand.
 
+### Fishfinder Pro Supabase link
+
+Fishfinder Pro (`DaddyFilth/Fishfinder-pro`) has its own Supabase project and users. The two projects stay separate and talk through this API: Fishfinder Pro already calls `/api/spots`, and its signed-in users can call `POST /api/trips` with their own Fishfinder Pro access token. The token is verified server-side against the Fishfinder Pro project and the outing is stored in this project with `external_source = 'fishfinder-pro'` and their user id (migration `0003_external_trip_users.sql`).
+
+Set these server-side variables: `FISHFINDER_SUPABASE_URL` and `FISHFINDER_SUPABASE_ANON_KEY` (the Fishfinder Pro project's URL and public key) and `SUPABASE_SERVICE_ROLE_KEY` (this project's service role key, used only for those inserts; never expose it to the browser). Fishfinder Pro's own tables are never read, and `middleware.ts` already allows requests from `https://fishfinder-pro.online`.
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:
